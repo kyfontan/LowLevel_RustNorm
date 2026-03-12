@@ -48,6 +48,12 @@ declare_lint! {
     "construction of LinkedList, which is usually hostile to cache locality"
 }
 
+declare_lint! {
+    pub FIELD_ORDER_BY_SIZE,
+    Warn,
+    "struct fields are not ordered by decreasing size, which can introduce padding"
+}
+
 #[derive(Default)]
 struct MachineOrientedLints {
     config: Config,
@@ -65,6 +71,7 @@ impl_lint_pass!(MachineOrientedLints => [
     SMALL_VEC_WITH_CAPACITY,
     VEC_NEW_THEN_PUSH,
     LINKED_LIST_NEW,
+    FIELD_ORDER_BY_SIZE,
 ]);
 
 #[unsafe(no_mangle)]
@@ -75,6 +82,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         SMALL_VEC_WITH_CAPACITY,
         VEC_NEW_THEN_PUSH,
         LINKED_LIST_NEW,
+        FIELD_ORDER_BY_SIZE,
     ]);
 
     lint_store.register_early_pass(|| Box::new(MachineOrientedLints::new()));
@@ -129,6 +137,37 @@ impl EarlyLintPass for MachineOrientedLints {
             }
         }
     }
+
+    fn check_item(&mut self, cx: &EarlyContext<'_>, item: &rustc_ast::ast::Item) {
+    use rustc_ast::ast::ItemKind;
+
+    let ItemKind::Struct(_, _, def) = &item.kind else {
+        return;
+    };
+
+    let mut last_size = usize::MAX;
+
+    for field in def.fields() {
+        let size = approx_type_size(&field.ty);
+
+        if size > last_size {
+            let mut diag = cx.sess().dcx().struct_span_warn(
+                field.span,
+                "struct fields should be ordered by decreasing size to reduce padding",
+            );
+
+            diag.help(
+                "reorder fields from largest to smallest types (u64 -> u32 -> u16 -> u8)",
+            );
+
+            diag.emit();
+
+            break;
+        }
+
+        last_size = size;
+    }
+}
 }
 
 fn small_vec_with_capacity_literal(expr: &Expr) -> Option<u128> {
@@ -276,4 +315,26 @@ fn path_suffix<'a>(segments: impl Iterator<Item = &'a str>, suffix: &[&str]) -> 
     let collected: Vec<&str> = segments.collect();
     collected.len() >= suffix.len()
         && &collected[collected.len() - suffix.len()..] == suffix
+}
+
+fn approx_type_size(ty: &rustc_ast::ast::Ty) -> usize {
+    use rustc_ast::ast::TyKind;
+
+    match &ty.kind {
+        TyKind::Path(_, path) => {
+            if let Some(seg) = path.segments.last() {
+                match seg.ident.name.as_str() {
+                    "u128" | "i128" => 16,
+                    "u64" | "i64" | "f64" => 8,
+                    "u32" | "i32" | "f32" => 4,
+                    "u16" | "i16" => 2,
+                    "u8" | "i8" | "bool" => 1,
+                    _ => 8,
+                }
+            } else {
+                8
+            }
+        }
+        _ => 8,
+    }
 }

@@ -1,6 +1,6 @@
 [workspace.metadata.dylint]
 libraries = [
-  { path = "/ABSOLUTE/PATH/TO/rust-perf-norm/machine-oriented-lints" },
+  { path = "__RUST_PERF_NORM_ROOT__/machine-oriented-lints" },
 ]
 
 [machine_oriented_lints]

@@ -1,0 +1,8 @@
+[workspace.metadata.dylint]
+libraries = [
+  { path = "/Users/konan/LowLevel_RustNorm/machine-oriented-lints" },
+]
+
+[machine_oriented_lints]
+small_vec_capacity_threshold = 64
+vec_new_then_push_min_pushes = 2

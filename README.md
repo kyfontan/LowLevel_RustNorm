@@ -1,65 +1,260 @@
 # rust-perf-norm
 
-A global Rust performance lint setup built around:
+**Rust performance lint toolkit focused on machine-level efficiency.**
+
+`rust-perf-norm` provides a global Rust linting setup designed to help developers write code that is closer to the machine and more conscious of:
+
+- CPU cache behavior
+- allocation cost
+- memory layout
+- data locality
+- unnecessary indirection
+
+It combines:
 
 - **Clippy** for standard lints
 - **Dylint** for custom machine-oriented lints
-- **VS Code** integration so the checks appear directly in the editor
+- **VS Code integration** for real-time feedback inside the editor
 
-This starter kit is designed to be:
+The goal is to make performance-oriented practices **the default** across Rust projects.
 
-- **global by default** across your Rust projects
-- **easy to disable per project**
-- focused on **cache locality, allocation discipline, and data layout awareness**
+---
 
-## What is included
+# Philosophy
 
-- `machine-oriented-lints/` — a Dylint library with custom lints
-- `install/install.sh` — bootstrap script for Unix-like systems
-- `templates/` — snippets for per-project activation and disabling
-- `snippets/rust.json` — VS Code snippet for crate-level Clippy policy
-- `vscode/settings.json` — recommended global VS Code settings
+Modern CPUs are extremely fast at arithmetic but **slow at memory access**.
 
-## Custom lints in this starter
+Typical latencies:
 
-### 1. `small_vec_with_capacity`
-Warns when code uses `Vec::with_capacity(N)` with a small compile-time constant.
+| Resource | Latency |
+|---------|--------|
+| L1 cache | ~1–4 cycles |
+| L2 cache | ~10 cycles |
+| L3 cache | ~40 cycles |
+| RAM | ~100–300 cycles |
 
-Why: small fixed-size collections often have better locality and lower allocation overhead when represented with:
+Many performance issues in modern software come from:
 
-- `[T; N]`
-- `SmallVec<[T; N]>`
-- `ArrayVec<T, N>`
+- heap allocations
+- pointer chasing
+- poor data locality
+- unnecessary copies
 
-### 2. `vec_new_then_push`
-Warns when a `Vec::new()` is immediately followed by consecutive `.push(...)` calls in the same block.
+`rust-perf-norm` focuses on **linting patterns that harm cache locality or allocation behavior**.
 
-Why: that pattern tends to reallocate unless capacity was reserved up front. Even when amortized complexity is good, the hot-path cost includes allocator traffic and copies.
+---
 
-### 3. `linked_list_new`
+# Features
+
+### Global by default
+
+The setup is designed to work **across all Rust projects** using Cargo aliases and Dylint.
+
+### Easy to disable per project
+
+You can opt out entirely or silence specific lints locally.
+
+### Editor integration
+
+Warnings appear directly in **VS Code** during development.
+
+---
+
+# Repository Structure
+
+```
+rust-perf-norm/
+│
+├─ install/
+│  ├─ install.sh
+│  └─ uninstall.sh
+│
+├─ machine-oriented-lints/
+│  ├─ Cargo.toml
+│  └─ src/lib.rs
+│
+├─ templates/
+│  ├─ cargo-home-config.toml
+│  ├─ crate_attributes.rs
+│  └─ project.dylint.toml
+│
+├─ snippets/
+│  └─ rust.json
+│
+└─ rust-toolchain.toml
+```
+
+---
+
+# Included Lints
+
+## 1. `small_vec_with_capacity`
+
+Warns when code uses:
+
+```rust
+Vec::with_capacity(N)
+```
+
+with a **small compile-time constant**.
+
+### Example triggering the lint
+
+```rust
+fn main() {
+    let mut v = Vec::with_capacity(8);
+
+    v.push(1);
+    v.push(2);
+}
+```
+
+### Why this matters
+
+For very small collections, heap allocation is often unnecessary.
+
+Better options:
+
+```
+[T; N]
+SmallVec<[T; N]>
+ArrayVec<T, N>
+```
+
+These keep data **contiguous and often stack-allocated**, improving cache locality.
+
+---
+
+## 2. `vec_new_then_push`
+
+Warns when a vector is created with:
+
+```rust
+Vec::new()
+```
+
+and immediately followed by multiple `.push()` calls.
+
+### Example triggering the lint
+
+```rust
+fn main() {
+    let mut v = Vec::new();
+
+    v.push(1);
+    v.push(2);
+    v.push(3);
+}
+```
+
+### Better approach
+
+```rust
+let mut v = Vec::with_capacity(3);
+```
+
+### Why this matters
+
+Without capacity reservation:
+
+- multiple reallocations may occur
+- memory copies may happen
+- allocator traffic increases
+
+Even if amortized complexity is good, **hot-path allocations are expensive**.
+
+---
+
+## 3. `linked_list_new`
+
 Warns when `LinkedList::new()` is used.
 
-Why: linked lists are usually hostile to CPU caches because traversal requires pointer chasing instead of contiguous reads.
+### Example triggering the lint
 
-## Install
+```rust
+use std::collections::LinkedList;
+
+fn main() {
+    let mut list = LinkedList::new();
+
+    list.push_back(1);
+}
+```
+
+### Why this matters
+
+Linked lists cause **pointer chasing**.
+
+Instead of reading contiguous memory, the CPU must follow pointers between nodes.
+
+Consequences:
+
+- poor spatial locality
+- more cache misses
+- more branch mispredictions
+
+Better alternatives:
+
+```
+Vec
+VecDeque
+SmallVec
+ArrayVec
+```
+
+---
+
+# Installation
+
+Clone the repository:
+
+```bash
+git clone git@github.com:kyfontan/LowLevel_RustNorm.git
+cd LowLevel_RustNorm
+```
+
+Run the installation script:
 
 ```bash
 bash install/install.sh
 ```
 
-That script does three things:
+The script will:
 
-1. installs `cargo-dylint` and `dylint-link`
-2. adds a global Cargo alias `cargo pc`
-3. installs the VS Code Rust snippet in the right user folder for your OS (`~/.config/Code/User/snippets/` on Linux, `~/Library/Application Support/Code/User/snippets/` on macOS) and prints the Dylint workspace snippet to add to any project that should opt in
+1. install `cargo-dylint` and `dylint-link`
+2. install the pinned Rust nightly toolchain
+3. add Cargo aliases
+4. install VS Code snippets
+5. configure the Dylint linker
+6. generate a `project.dylint.toml` example
 
-## Use globally in VS Code
+---
 
-Copy the contents of `vscode/settings.json` into your user settings.
+# Running the Lints
 
-## Enable in a project
+Inside any Rust project that enables the lints:
 
-Put this in the target workspace's `dylint.toml`:
+```bash
+cargo dylint --all
+```
+
+Or with the installed alias:
+
+```bash
+cargo pd
+```
+
+You can also run the Clippy policy:
+
+```bash
+cargo pc
+```
+
+---
+
+# Enable in a Project
+
+Add this to the project's configuration:
 
 ```toml
 [workspace.metadata.dylint]
@@ -78,17 +273,65 @@ Then run:
 cargo dylint --all
 ```
 
-Or, after the global Cargo alias is installed:
+---
+
+# Testing the Lints
+
+You can verify that the lints work using a simple test project.
+
+Create a test project:
 
 ```bash
-cargo pc
+cargo new lint_test
+cd lint_test
 ```
 
-## Disable for one project
+Add the dylint configuration and run:
 
-Option 1: do not include the Dylint workspace metadata.
+```bash
+cargo dylint --all
+```
 
-Option 2: keep the library loaded but silence a specific lint inside a crate:
+### Test Code
+
+```rust
+use std::collections::LinkedList;
+
+fn main() {
+    let mut small = Vec::with_capacity(4);
+
+    small.push(1);
+    small.push(2);
+
+    let mut v = Vec::new();
+
+    v.push(1);
+    v.push(2);
+    v.push(3);
+
+    let mut list = LinkedList::new();
+
+    list.push_back(1);
+}
+```
+
+This should trigger all three lints.
+
+Expected warnings:
+
+```
+warning: small constant capacity in Vec::with_capacity
+warning: Vec::new() followed by push calls
+warning: LinkedList::new() used here
+```
+
+---
+
+# Disable for One Project
+
+Option 1: remove the Dylint workspace metadata.
+
+Option 2: disable a lint in the crate:
 
 ```rust
 #![allow(small_vec_with_capacity)]
@@ -96,7 +339,7 @@ Option 2: keep the library loaded but silence a specific lint inside a crate:
 #![allow(linked_list_new)]
 ```
 
-Option 3: allow at narrower scope:
+Option 3: disable in a local scope:
 
 ```rust
 #[allow(vec_new_then_push)]
@@ -107,12 +350,24 @@ fn setup() {
 }
 ```
 
-## Notes
+---
 
-This repository is a **starter**. The lint code is meant to be extended with more rules over time, especially around:
+# Future Lints
 
-- allocation inside hot paths
-- field ordering and padding
-- cache-sensitive indirection patterns
-- APIs that take `&Vec<T>` instead of `&[T]`
-- fixed-size buffers that should stay on the stack
+This repository is intended to grow with additional machine-oriented rules such as:
+
+- allocation inside hot loops
+- field ordering and padding issues
+- cache-hostile indirection patterns
+- `Vec<bool>` usage
+- `HashMap` without capacity reservation
+- unnecessary cloning
+- inefficient iterator usage in hot paths
+- passing `&Vec<T>` instead of `&[T]`
+- stack vs heap allocation heuristics
+
+---
+
+# License
+
+MIT

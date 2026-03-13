@@ -1,55 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=install/common.sh
+source "$SCRIPT_DIR/install/common.sh"
+
+ROOT_DIR="$SCRIPT_DIR"
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
 CONFIG_FILE="$CARGO_HOME_DIR/config.toml"
+RUSTPERF_BIN="$CARGO_HOME_DIR/bin/rustperf"
+RUSTPERF_CMD_BIN="$CARGO_HOME_DIR/bin/rustperf.cmd"
 RUST_TOOLCHAIN_FILE="$ROOT_DIR/rust-toolchain.toml"
 LINT_CARGO_CONFIG="$ROOT_DIR/machine-oriented-lints/.cargo/config.toml"
 
-if [[ "${OSTYPE:-}" == darwin* ]]; then
-  VSCODE_USER_DIR="${HOME}/Library/Application Support/Code/User"
-else
-  VSCODE_USER_DIR="${HOME}/.config/Code/User"
-fi
+detect_platform
 
 SNIPPET_FILE="$VSCODE_USER_DIR/snippets/rust.json"
 
-remove_alias() {
-  local name="$1"
+log_section "Removing cargo aliases"
+remove_alias_from_cargo_config "$CONFIG_FILE" "pc"
+remove_alias_from_cargo_config "$CONFIG_FILE" "pd"
 
-  if [[ -f "$CONFIG_FILE" ]]; then
-    tmp=$(mktemp)
+log_section "Removing rustperf command"
+rm -f "$RUSTPERF_BIN"
+rm -f "$RUSTPERF_CMD_BIN"
 
-    awk -v alias="$name" '
-      BEGIN { in_alias = 0 }
-      /^\[alias\]/ { in_alias = 1; print; next }
-      /^\[/ && $0 != "[alias]" { in_alias = 0 }
-      {
-        if (in_alias && $1 ~ alias"=") next
-        print
-      }
-    ' "$CONFIG_FILE" > "$tmp"
-
-    mv "$tmp" "$CONFIG_FILE"
-  fi
-}
-
-printf '==> Removing cargo aliases\n'
-remove_alias "pc"
-remove_alias "pd"
-
-printf '==> Removing rust-toolchain.toml\n'
+log_section "Removing rust-toolchain.toml"
 rm -f "$RUST_TOOLCHAIN_FILE"
 
-printf '==> Removing dylint linker config\n'
+log_section "Removing dylint linker config"
 rm -f "$LINT_CARGO_CONFIG"
 
-printf '==> Removing VS Code snippet\n'
+log_section "Removing VS Code snippet"
 rm -f "$SNIPPET_FILE"
 
-printf '==> Optionally uninstall dylint tools\n'
-
+log_section "Optionally uninstall dylint tools"
 read -r -p "Remove cargo-dylint and dylint-link? [y/N] " answer
 if [[ "$answer" =~ ^[Yy]$ ]]; then
   cargo uninstall cargo-dylint || true
@@ -57,7 +42,7 @@ if [[ "$answer" =~ ^[Yy]$ ]]; then
 fi
 
 echo
-echo "Uninstall complete."
+log_success "Uninstall complete."
 echo
 echo "Remaining files:"
 echo "  $ROOT_DIR/templates/"

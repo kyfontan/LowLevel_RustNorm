@@ -2,7 +2,3 @@
 libraries = [
   { path = "__RUST_PERF_NORM_ROOT__/machine-oriented-lints" },
 ]
-
-[machine_oriented_lints]
-small_vec_capacity_threshold = 64
-vec_new_then_push_min_pushes = 2

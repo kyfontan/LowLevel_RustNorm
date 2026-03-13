@@ -5,7 +5,10 @@ extern crate rustc_lint;
 extern crate rustc_session;
 extern crate rustc_span;
 
-use rustc_ast::ast::{Block, Expr, ExprKind, Local, LocalKind, PatKind, Stmt, StmtKind};
+use rustc_ast::ast::{
+    Block, Expr, ExprKind, FieldDef, Item, ItemKind, Local, LocalKind, PatKind, Stmt, StmtKind,
+    Ty, TyKind, VariantData,
+};
 use rustc_ast::token::LitKind as TokenLitKind;
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
 use rustc_session::{declare_lint, impl_lint_pass};
@@ -14,10 +17,21 @@ use serde::Deserialize;
 
 dylint_linting::dylint_library!();
 
+const VEC_WITH_CAPACITY_PATHS: &[&[&str]] = &[
+    &["Vec", "with_capacity"],
+    &["vec", "Vec", "with_capacity"],
+];
+const VEC_NEW_PATHS: &[&[&str]] = &[&["Vec", "new"], &["vec", "Vec", "new"]];
+const LINKED_LIST_NEW_PATHS: &[&[&str]] = &[
+    &["LinkedList", "new"],
+    &["collections", "LinkedList", "new"],
+    &["std", "collections", "LinkedList", "new"],
+];
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct Config {
-    small_vec_capacity_threshold: u128,
+    small_vec_capacity_threshold: u64,
     vec_new_then_push_min_pushes: usize,
 }
 
@@ -90,98 +104,129 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
 
 impl EarlyLintPass for MachineOrientedLints {
     fn check_expr(&mut self, cx: &EarlyContext<'_>, expr: &Expr) {
-        if let Some(capacity) = small_vec_with_capacity_literal(expr) {
-            if capacity <= self.config.small_vec_capacity_threshold {
-                let mut diag = cx.sess().dcx().struct_span_warn(
-                    expr.span,
-                    format!("small constant capacity ({capacity}) in `Vec::with_capacity`"),
-                );
-                diag.help(
-                    "for tiny fixed-capacity collections, review `[T; N]`, `SmallVec<[T; N]>`, or `ArrayVec<T, N>` to reduce heap traffic and improve locality",
-                );
-                diag.emit();
-            }
-        }
-
-        if is_linked_list_new(expr) {
-            let mut diag = cx
-                .sess()
-                .dcx()
-                .struct_span_warn(expr.span, "`LinkedList::new()` used here");
-            diag.help(
-                "prefer contiguous storage (`Vec`, array, `SmallVec`, `VecDeque`) unless you benchmarked and proved a linked list is better",
-            );
-            diag.emit();
-        }
+        lint_small_vec_with_capacity(cx, expr, &self.config);
+        lint_linked_list_new(cx, expr);
     }
 
     fn check_block(&mut self, cx: &EarlyContext<'_>, block: &Block) {
-        let min_pushes = self.config.vec_new_then_push_min_pushes;
-        let stmts = &block.stmts;
-
-        for i in 0..stmts.len() {
-            let Some((binding, span)) = local_vec_new_binding(&stmts[i]) else {
-                continue;
-            };
-
-            let pushes = consecutive_push_count(binding, &stmts[i + 1..]);
-            if pushes >= min_pushes {
-                let mut diag = cx.sess().dcx().struct_span_warn(
-                    span,
-                    format!("`Vec::new()` is followed by {pushes} consecutive `push` calls"),
-                );
-                diag.help(format!(
-                    "prefer `Vec::with_capacity({pushes})` or a fixed-capacity stack-backed representation when size is known"
-                ));
-                diag.emit();
-            }
-        }
+        lint_vec_new_then_push(cx, block, &self.config);
     }
 
-    fn check_item(&mut self, cx: &EarlyContext<'_>, item: &rustc_ast::ast::Item) {
-    use rustc_ast::ast::ItemKind;
+    fn check_item(&mut self, cx: &EarlyContext<'_>, item: &Item) {
+        lint_field_order_by_size(cx, item);
+    }
+}
 
-    let ItemKind::Struct(_, _, def) = &item.kind else {
+fn lint_small_vec_with_capacity(cx: &EarlyContext<'_>, expr: &Expr, config: &Config) {
+    let Some(capacity) = small_vec_with_capacity_literal(expr) else {
         return;
     };
 
-    let mut last_size = usize::MAX;
+    if capacity > config.small_vec_capacity_threshold {
+        return;
+    }
 
-    for field in def.fields() {
-        let size = approx_type_size(&field.ty);
+    let mut diag = cx.sess().dcx().struct_span_warn(
+        expr.span,
+        format!("small constant capacity ({capacity}) in `Vec::with_capacity`"),
+    );
+    diag.help(
+        "for tiny fixed-capacity collections, review `[T; N]`, `SmallVec<[T; N]>`, or `ArrayVec<T, N>` to reduce heap traffic and improve locality",
+    );
+    diag.emit();
+}
 
-        if size > last_size {
-            let mut diag = cx.sess().dcx().struct_span_warn(
-                field.span,
-                "struct fields should be ordered by decreasing size to reduce padding",
-            );
+fn lint_linked_list_new(cx: &EarlyContext<'_>, expr: &Expr) {
+    if !is_linked_list_new(expr) {
+        return;
+    }
 
-            diag.help(
-                "reorder fields from largest to smallest types (u64 -> u32 -> u16 -> u8)",
-            );
+    let mut diag = cx
+        .sess()
+        .dcx()
+        .struct_span_warn(expr.span, "`LinkedList::new()` used here");
+    diag.help(
+        "prefer contiguous storage (`Vec`, array, `SmallVec`, `VecDeque`) unless you benchmarked and proved a linked list is better",
+    );
+    diag.emit();
+}
 
-            diag.emit();
+fn lint_vec_new_then_push(cx: &EarlyContext<'_>, block: &Block, config: &Config) {
+    let min_pushes = config.vec_new_then_push_min_pushes;
+    let stmts = &block.stmts;
 
-            break;
+    if min_pushes == 0 {
+        return;
+    }
+
+    for (index, stmt) in stmts.iter().enumerate() {
+        let Some((binding, span)) = local_vec_new_binding(stmt) else {
+            continue;
+        };
+
+        let pushes = consecutive_push_count(binding, &stmts[index + 1..]);
+        if pushes < min_pushes {
+            continue;
         }
 
-        last_size = size;
+        let mut diag = cx.sess().dcx().struct_span_warn(
+            span,
+            format!("`Vec::new()` is followed by {pushes} consecutive `push` calls"),
+        );
+        diag.help(format!(
+            "prefer `Vec::with_capacity({pushes})` or a fixed-capacity stack-backed representation when size is known"
+        ));
+        diag.emit();
     }
 }
+
+fn lint_field_order_by_size(cx: &EarlyContext<'_>, item: &Item) {
+    let ItemKind::Struct(_, _, variant) = &item.kind else {
+        return;
+    };
+
+    let VariantData::Struct { fields, .. } = variant else {
+        return;
+    };
+
+    if fields.len() < 2 {
+        return;
+    }
+
+    let Some(sized_fields) = sized_named_fields(fields) else {
+        return;
+    };
+
+    let Some((previous, previous_size, current, current_size)) =
+        first_field_order_violation(&sized_fields)
+    else {
+        return;
+    };
+
+    let previous_name = field_name(previous);
+    let current_name = field_name(current);
+
+    let mut diag = cx.sess().dcx().struct_span_warn(
+        current.span,
+        format!(
+            "field `{current_name}` ({current_size} bytes) comes after larger field `{previous_name}` ({previous_size} bytes)"
+        ),
+    );
+    diag.help(
+        "reorder fields from larger fixed-size primitives to smaller ones when representation and API constraints allow it",
+    );
+    diag.note(
+        "this lint is intentionally conservative and currently checks only named structs made entirely of known primitive scalar fields",
+    );
+    diag.emit();
 }
 
-fn small_vec_with_capacity_literal(expr: &Expr) -> Option<u128> {
+fn small_vec_with_capacity_literal(expr: &Expr) -> Option<u64> {
     let ExprKind::Call(callee, args) = &expr.kind else {
         return None;
     };
 
-    if args.len() != 1 {
-        return None;
-    }
-
-    if !path_suffix_of_expr(callee, &["Vec", "with_capacity"])
-        && !path_suffix_of_expr(callee, &["vec", "Vec", "with_capacity"])
-    {
+    if args.len() != 1 || !matches_any_path_suffix(callee, VEC_WITH_CAPACITY_PATHS) {
         return None;
     }
 
@@ -193,13 +238,7 @@ fn is_linked_list_new(expr: &Expr) -> bool {
         return false;
     };
 
-    if !args.is_empty() {
-        return false;
-    }
-
-    path_suffix_of_expr(callee, &["LinkedList", "new"])
-        || path_suffix_of_expr(callee, &["collections", "LinkedList", "new"])
-        || path_suffix_of_expr(callee, &["std", "collections", "LinkedList", "new"])
+    args.is_empty() && matches_any_path_suffix(callee, LINKED_LIST_NEW_PATHS)
 }
 
 fn local_vec_new_binding(stmt: &Stmt) -> Option<(Symbol, Span)> {
@@ -210,33 +249,22 @@ fn local_vec_new_binding(stmt: &Stmt) -> Option<(Symbol, Span)> {
     let binding = local_binding_name(local)?;
     let init = local_init_expr(local)?;
 
-    if is_vec_new_expr(init) {
-        Some((binding, stmt.span))
-    } else {
-        None
-    }
+    is_vec_new_expr(init).then_some((binding, stmt.span))
 }
 
 fn local_init_expr(local: &Local) -> Option<&Expr> {
     match &local.kind {
         LocalKind::Decl => None,
-        LocalKind::Init(expr) => Some(&**expr),
-        LocalKind::InitElse(expr, _) => Some(&**expr),
+        LocalKind::Init(expr) => Some(expr),
+        LocalKind::InitElse(expr, _) => Some(expr),
     }
 }
 
 fn consecutive_push_count(binding: Symbol, stmts: &[Stmt]) -> usize {
-    let mut count = 0;
-
-    for stmt in stmts {
-        if is_push_stmt_for(stmt, binding) {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-
-    count
+    stmts
+        .iter()
+        .take_while(|stmt| is_push_stmt_for(stmt, binding))
+        .count()
 }
 
 fn is_push_stmt_for(stmt: &Stmt, binding: Symbol) -> bool {
@@ -251,11 +279,7 @@ fn is_push_call_for(expr: &Expr, binding: Symbol) -> bool {
         return false;
     };
 
-    if method_call.seg.ident.name != Symbol::intern("push") {
-        return false;
-    }
-
-    if method_call.args.len() != 1 {
+    if method_call.seg.ident.name.as_str() != "push" || method_call.args.len() != 1 {
         return false;
     }
 
@@ -267,22 +291,16 @@ fn is_vec_new_expr(expr: &Expr) -> bool {
         return false;
     };
 
-    args.is_empty()
-        && (path_suffix_of_expr(callee, &["Vec", "new"])
-            || path_suffix_of_expr(callee, &["vec", "Vec", "new"]))
+    args.is_empty() && matches_any_path_suffix(callee, VEC_NEW_PATHS)
 }
 
-fn integer_literal(expr: &Expr) -> Option<u128> {
+fn integer_literal(expr: &Expr) -> Option<u64> {
     let ExprKind::Lit(token_lit) = &expr.kind else {
         return None;
     };
 
     match token_lit.kind {
-        TokenLitKind::Integer => {
-            let raw = token_lit.symbol.as_str();
-            let cleaned = raw.replace('_', "");
-            cleaned.parse::<u128>().ok()
-        }
+        TokenLitKind::Integer => token_lit.symbol.as_str().replace('_', "").parse::<u64>().ok(),
         _ => None,
     }
 }
@@ -303,38 +321,64 @@ fn is_path_expr_named(expr: &Expr, name: Symbol) -> bool {
     path.segments.len() == 1 && path.segments[0].ident.name == name
 }
 
+fn matches_any_path_suffix(expr: &Expr, candidates: &[&[&str]]) -> bool {
+    candidates.iter().any(|suffix| path_suffix_of_expr(expr, suffix))
+}
+
 fn path_suffix_of_expr(expr: &Expr, suffix: &[&str]) -> bool {
     let ExprKind::Path(_, path) = &expr.kind else {
         return false;
     };
 
-    path_suffix(path.segments.iter().map(|seg| seg.ident.name.as_str()), suffix)
+    let collected: Vec<&str> = path.segments.iter().map(|seg| seg.ident.name.as_str()).collect();
+    collected.len() >= suffix.len() && &collected[collected.len() - suffix.len()..] == suffix
 }
 
-fn path_suffix<'a>(segments: impl Iterator<Item = &'a str>, suffix: &[&str]) -> bool {
-    let collected: Vec<&str> = segments.collect();
-    collected.len() >= suffix.len()
-        && &collected[collected.len() - suffix.len()..] == suffix
+fn field_name(field: &FieldDef) -> String {
+    field
+        .ident
+        .as_ref()
+        .map(|ident| ident.name.to_string())
+        .unwrap_or_else(|| "<field>".to_string())
 }
 
-fn approx_type_size(ty: &rustc_ast::ast::Ty) -> usize {
-    use rustc_ast::ast::TyKind;
+fn sized_named_fields(fields: &[FieldDef]) -> Option<Vec<(&FieldDef, usize)>> {
+    fields
+        .iter()
+        .map(|field| Some((field, primitive_type_size(&field.ty)?)))
+        .collect()
+}
 
-    match &ty.kind {
-        TyKind::Path(_, path) => {
-            if let Some(seg) = path.segments.last() {
-                match seg.ident.name.as_str() {
-                    "u128" | "i128" => 16,
-                    "u64" | "i64" | "f64" => 8,
-                    "u32" | "i32" | "f32" => 4,
-                    "u16" | "i16" => 2,
-                    "u8" | "i8" | "bool" => 1,
-                    _ => 8,
-                }
-            } else {
-                8
-            }
+fn first_field_order_violation<'a>(
+    fields: &'a [(&'a FieldDef, usize)],
+) -> Option<(&'a FieldDef, usize, &'a FieldDef, usize)> {
+    let mut previous = *fields.first()?;
+
+    for current in fields.iter().copied().skip(1) {
+        if current.1 > previous.1 {
+            return Some((previous.0, previous.1, current.0, current.1));
         }
-        _ => 8,
+
+        previous = current;
+    }
+
+    None
+}
+
+fn primitive_type_size(ty: &Ty) -> Option<usize> {
+    let TyKind::Path(_, path) = &ty.kind else {
+        return None;
+    };
+
+    let segment = path.segments.last()?;
+    match segment.ident.name.as_str() {
+        "u128" | "i128" => Some(16),
+        "u64" | "i64" | "f64" => Some(8),
+        "u32" | "i32" | "f32" => Some(4),
+        "u16" | "i16" => Some(2),
+        "u8" | "i8" | "bool" => Some(1),
+        _ => None,
     }
 }
+
+

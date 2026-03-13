@@ -1,0 +1,6 @@
+[machine_oriented_lints]
+# Warn when Vec::with_capacity uses a tiny compile-time constant.
+small_vec_capacity_threshold = 64
+
+# Warn when Vec::new() is followed by N or more consecutive push calls.
+vec_new_then_push_min_pushes = 2

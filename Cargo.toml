@@ -1,0 +1,3 @@
+[workspace]
+members = ["machine-oriented-lints"]
+resolver = "2"

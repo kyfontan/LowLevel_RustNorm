@@ -1,4 +1,23 @@
-/target
-/assets/generated
-*.lock
+# Rust build outputs
+/target/
+**/target/
+
+# Installer-generated examples
+/assets/generated/
+
+# Local compatibility shim lockfile
+/machine-oriented-lints/Cargo.lock
+
+# macOS
 .DS_Store
+
+# Editors
+.idea/
+.fleet/
+*.swp
+*.swo
+*~
+
+# Logs and temp files
+*.log
+*.tmp

@@ -145,17 +145,24 @@ from the current project without retyping it every time.
 
 ### Project bootstrap
 
-The installed `rustperf` command also supports:
+The installed `rustperf` command supports:
 
 ```text
 rustperf init
+rustperf repair
 ```
 
-When run from a project root containing `Cargo.toml`, it:
+When run from a project root containing `Cargo.toml`, `rustperf init`:
 
 - appends the required Dylint library metadata to `Cargo.toml`
 - creates or appends `dylint.toml`
 - avoids duplicating sections that already exist
+
+And `rustperf repair` can:
+
+- rewrite outdated Dylint library paths after a repo move or rename
+- restore missing config blocks in the current project
+- repair the installed `rustperf` wrapper itself
 
 ### Workspace-friendly
 
@@ -371,6 +378,8 @@ The installer will:
 8. write `crates/machine-oriented-lints/.cargo/config.toml`
 9. generate a `Cargo.toml` example and a `dylint.toml` example under `assets/generated/`
 
+`rustperf`, `rustperf init`, and `rustperf repair` are intended to behave consistently on macOS, Linux, and Windows.
+
 ---
 
 # Running the Lints
@@ -405,6 +414,14 @@ To bootstrap the current project automatically:
 rustperf init
 ```
 
+To repair a project or wrapper after a path change, repo rename, or stale installation:
+
+```text
+rustperf repair
+rustperf repair project
+rustperf repair self
+```
+
 ---
 
 # Enable in a Project
@@ -414,6 +431,12 @@ From the target project root, the simplest flow is:
 ```text
 rustperf init
 rustperf
+```
+
+If the project was initialized with an older Rustperf path, or the repo was moved or renamed, run:
+
+```text
+rustperf repair
 ```
 
 If you prefer manual setup, use the configuration shown above in the `Configuration` section.
@@ -433,6 +456,22 @@ Then, in a Rust project configured for Dylint:
 ```text
 rustperf
 ```
+
+---
+
+# Repair Commands
+
+Rustperf includes a built-in repair flow for stale setups:
+
+- `rustperf repair` repairs the current project when possible and refreshes the installed wrapper
+- `rustperf repair project` repairs only the current project
+- `rustperf repair self` repairs only the installed wrapper in Cargo's bin directory
+
+This is especially useful after:
+
+- moving the repository
+- renaming the repository
+- keeping an older `Cargo.toml` that still points to a stale Dylint library path
 
 ---
 

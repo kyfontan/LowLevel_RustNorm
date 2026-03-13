@@ -3,6 +3,40 @@ set -euo pipefail
 
 RUSTPERF_NORM_ROOT="__RUST_PERF_NORM_ROOT__"
 LINT_LIBRARY_PATH="$RUSTPERF_NORM_ROOT/crates/machine-oriented-lints"
+LEGACY_LIBRARY_PATH="$RUSTPERF_NORM_ROOT/machine-oriented-lints"
+LEGACY_RENAMED_LIBRARY_PATH="$(dirname "$RUSTPERF_NORM_ROOT")/LowLevel_RustNorm/machine-oriented-lints"
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+RUSTPERF_BIN="$CARGO_HOME_DIR/bin/rustperf"
+RUSTPERF_TEMPLATE="$RUSTPERF_NORM_ROOT/assets/templates/rustperf"
+
+cargo_block() {
+  cat <<EOF
+[workspace.metadata.dylint]
+libraries = [
+  { path = "$LINT_LIBRARY_PATH" },
+]
+EOF
+}
+
+dylint_block() {
+  cat <<'EOF'
+[machine_oriented_lints]
+# Warn when Vec::with_capacity uses a tiny compile-time constant.
+small_vec_capacity_threshold = 64
+
+# Warn when Vec::new() is followed by N or more consecutive push calls.
+vec_new_then_push_min_pushes = 2
+
+# Warn when HashMap::new() is followed by N or more consecutive insert calls.
+hash_map_new_then_insert_min_inserts = 2
+
+# Warn when HashSet::new() is followed by N or more consecutive insert calls.
+hash_set_new_then_insert_min_inserts = 2
+
+# Warn when String::new() is followed by N or more consecutive push_str calls.
+string_new_then_push_str_min_calls = 2
+EOF
+}
 
 append_block_if_missing() {
   local file_path="$1"
@@ -28,50 +62,120 @@ append_block_if_missing() {
   printf '%s' "$block" > "$file_path"
 }
 
-init_project() {
+repair_project() {
   local cargo_toml="$PWD/Cargo.toml"
   local dylint_toml="$PWD/dylint.toml"
-  local cargo_block dylint_block
 
   if [[ ! -f "$cargo_toml" ]]; then
-    printf 'Error: no Cargo.toml found in %s\n' "$PWD" >&2
-    exit 1
+    return 1
   fi
 
-  cargo_block=$(cat <<EOF
-[workspace.metadata.dylint]
+  python3 - "$cargo_toml" "$LINT_LIBRARY_PATH" "$LEGACY_LIBRARY_PATH" "$LEGACY_RENAMED_LIBRARY_PATH" <<'PY2'
+from pathlib import Path
+import sys
+
+cargo_toml = Path(sys.argv[1])
+current = sys.argv[2]
+legacy_same_root = sys.argv[3]
+legacy_renamed_root = sys.argv[4]
+content = cargo_toml.read_text(encoding='utf-8')
+updated = content.replace(legacy_renamed_root, current).replace(legacy_same_root, current)
+if '[workspace.metadata.dylint]' not in updated:
+    block = """[workspace.metadata.dylint]
 libraries = [
-  { path = "$LINT_LIBRARY_PATH" },
+  { path = "__CURRENT__" },
 ]
-EOF
-)
+""".replace('__CURRENT__', current)
+    if updated and not updated.endswith('\n'):
+        updated += '\n\n' + block
+    elif updated:
+        updated += '\n' + block
+    else:
+        updated = block
+cargo_toml.write_text(updated, encoding='utf-8')
+PY2
 
-  dylint_block=$(cat <<'EOF'
-[machine_oriented_lints]
-# Warn when Vec::with_capacity uses a tiny compile-time constant.
-small_vec_capacity_threshold = 64
-
-# Warn when Vec::new() is followed by N or more consecutive push calls.
-vec_new_then_push_min_pushes = 2
-EOF
-)
-
-  append_block_if_missing "$cargo_toml" "[workspace.metadata.dylint]" "$cargo_block"
-  append_block_if_missing "$dylint_toml" "[machine_oriented_lints]" "$dylint_block"
+  append_block_if_missing "$dylint_toml" "[machine_oriented_lints]" "$(dylint_block)"
 
   printf 'Updated %s\n' "$cargo_toml"
   printf 'Updated %s\n' "$dylint_toml"
+  return 0
 }
 
-if [[ "${1:-}" == "init" ]]; then
-  shift
-  if [[ $# -gt 0 ]]; then
-    printf 'Error: rustperf init does not accept extra arguments\n' >&2
-    exit 1
+repair_self() {
+  local tmp_file
+
+  if [[ ! -f "$RUSTPERF_TEMPLATE" ]]; then
+    printf 'Error: rustperf template not found: %s\n' "$RUSTPERF_TEMPLATE" >&2
+    return 1
   fi
 
-  init_project
-  exit 0
+  mkdir -p "$(dirname "$RUSTPERF_BIN")"
+  tmp_file="$(mktemp "$(dirname "$RUSTPERF_BIN")/rustperf.XXXXXX")"
+  sed "s|__RUST_PERF_NORM_ROOT__|${RUSTPERF_NORM_ROOT//|/\\|}|g" "$RUSTPERF_TEMPLATE" > "$tmp_file"
+  chmod +x "$tmp_file"
+  mv "$tmp_file" "$RUSTPERF_BIN"
+  printf 'Repaired %s\n' "$RUSTPERF_BIN"
+}
+
+warn_if_outdated_project_path() {
+  local cargo_toml="$PWD/Cargo.toml"
+
+  [[ -f "$cargo_toml" ]] || return 1
+
+  if grep -Fq "$LEGACY_RENAMED_LIBRARY_PATH" "$cargo_toml" || grep -Fq "$LEGACY_LIBRARY_PATH" "$cargo_toml"; then
+    printf 'Error: detected an outdated Rustperf Dylint library path in %s\n' "$cargo_toml" >&2
+    printf 'Run `rustperf repair` from this project root to fix it automatically.\n' >&2
+    return 0
+  fi
+
+  return 1
+}
+
+case "${1:-}" in
+  init)
+    shift
+    if [[ $# -gt 0 ]]; then
+      printf 'Error: rustperf init does not accept extra arguments\n' >&2
+      exit 1
+    fi
+    repair_project || {
+      printf 'Error: no Cargo.toml found in %s\n' "$PWD" >&2
+      exit 1
+    }
+    exit 0
+    ;;
+  repair)
+    shift
+    if [[ $# -gt 1 ]]; then
+      printf 'Error: rustperf repair accepts at most one argument: self or project\n' >&2
+      exit 1
+    fi
+    case "${1:-}" in
+      "")
+        repair_project || true
+        repair_self
+        ;;
+      self)
+        repair_self
+        ;;
+      project)
+        repair_project || {
+          printf 'Error: no Cargo.toml found in %s\n' "$PWD" >&2
+          exit 1
+        }
+        ;;
+      *)
+        printf 'Error: unknown rustperf repair target: %s\n' "$1" >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+
+if warn_if_outdated_project_path; then
+  exit 1
 fi
 
 exec cargo dylint --all "$@"
